@@ -274,6 +274,20 @@ class TestChatCompletionsEndpoint:
                     json.loads(chunk)
                     break
 
+    def test_chat_completion_streaming_null_max_tokens(self, api_client):
+        payload = self._chat_payload()
+        payload["stream"] = True
+        payload["max_tokens"] = None
+        with api_client.stream("POST", "/v1/chat/completions", json=payload) as response:
+            assert response.status_code == status.HTTP_200_OK
+            for line in response.iter_lines():
+                if line and line.startswith("data: "):
+                    chunk = line[6:]
+                    if chunk == "[DONE]":
+                        break
+                    json.loads(chunk)
+                    break
+
     def test_chat_completion_invalid_n(self, api_client):
         payload = self._chat_payload()
         payload["n"] = 2
@@ -300,6 +314,20 @@ class TestCompletionsEndpoint:
     def test_completion_streaming(self, api_client):
         payload = self._completion_payload()
         payload["stream"] = True
+        with api_client.stream("POST", "/v1/completions", json=payload) as response:
+            assert response.status_code == status.HTTP_200_OK
+            for line in response.iter_lines():
+                if line and line.startswith("data: "):
+                    chunk = line[6:]
+                    if chunk == "[DONE]":
+                        break
+                    json.loads(chunk)
+                    break
+
+    def test_completion_streaming_null_max_tokens(self, api_client):
+        payload = self._completion_payload()
+        payload["stream"] = True
+        payload["max_tokens"] = None
         with api_client.stream("POST", "/v1/completions", json=payload) as response:
             assert response.status_code == status.HTTP_200_OK
             for line in response.iter_lines():
