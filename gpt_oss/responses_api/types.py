@@ -51,7 +51,7 @@ class Item(BaseModel):
 
 
 class FunctionCallItem(BaseModel):
-    type: Literal["function_call"]
+    type: Literal["function_call"] = "function_call"
     name: str
     arguments: str
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
@@ -60,7 +60,7 @@ class FunctionCallItem(BaseModel):
 
 
 class FunctionCallOutputItem(BaseModel):
-    type: Literal["function_call_output"]
+    type: Literal["function_call_output"] = "function_call_output"
     call_id: str = "call_1234"
     output: str
 
