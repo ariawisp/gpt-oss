@@ -228,3 +228,90 @@ class TestUsageTracking:
         
         # Longer input should use more tokens
         assert usage2["input_tokens"] > usage1["input_tokens"]
+
+
+class TestModelsEndpoint:
+
+    def test_models_list(self, api_client):
+        response = api_client.get("/v1/models")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["object"] == "list"
+        assert isinstance(data["data"], list)
+        assert data["data"][0]["id"] == "gpt-oss-120b"
+
+
+class TestChatCompletionsEndpoint:
+
+    def _chat_payload(self):
+        return {
+            "model": "gpt-oss-120b",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Say hello"},
+            ],
+        }
+
+    def test_basic_chat_completion(self, api_client):
+        payload = self._chat_payload()
+        response = api_client.post("/v1/chat/completions", json=payload)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["object"] == "chat.completion"
+        assert data["choices"][0]["message"]["role"] == "assistant"
+        assert "Test response" in (data["choices"][0]["message"].get("content") or "")
+
+    def test_chat_completion_streaming(self, api_client):
+        payload = self._chat_payload()
+        payload["stream"] = True
+        with api_client.stream("POST", "/v1/chat/completions", json=payload) as response:
+            assert response.status_code == status.HTTP_200_OK
+            for line in response.iter_lines():
+                if line and line.startswith("data: "):
+                    chunk = line[6:]
+                    if chunk == "[DONE]":
+                        break
+                    json.loads(chunk)
+                    break
+
+    def test_chat_completion_invalid_n(self, api_client):
+        payload = self._chat_payload()
+        payload["n"] = 2
+        response = api_client.post("/v1/chat/completions", json=payload)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestCompletionsEndpoint:
+
+    def _completion_payload(self):
+        return {
+            "model": "gpt-oss-120b",
+            "prompt": "Hello there",
+        }
+
+    def test_basic_completion(self, api_client):
+        payload = self._completion_payload()
+        response = api_client.post("/v1/completions", json=payload)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["object"] == "text_completion"
+        assert "Test response" in data["choices"][0]["text"]
+
+    def test_completion_streaming(self, api_client):
+        payload = self._completion_payload()
+        payload["stream"] = True
+        with api_client.stream("POST", "/v1/completions", json=payload) as response:
+            assert response.status_code == status.HTTP_200_OK
+            for line in response.iter_lines():
+                if line and line.startswith("data: "):
+                    chunk = line[6:]
+                    if chunk == "[DONE]":
+                        break
+                    json.loads(chunk)
+                    break
+
+    def test_completion_invalid_n(self, api_client):
+        payload = self._completion_payload()
+        payload["n"] = 3
+        response = api_client.post("/v1/completions", json=payload)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
