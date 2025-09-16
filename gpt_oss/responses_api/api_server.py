@@ -30,6 +30,7 @@ from .events import (
     ResponseContentPartAdded,
     ResponseContentPartDone,
     ResponseCreatedEvent,
+    ResponseFunctionCallArgumentsDelta,
     ResponseEvent,
     ResponseInProgressEvent,
     ResponseOutputItemAdded,
@@ -591,6 +592,10 @@ def create_api_server(
             self.python_tool = python_tool
             self.use_code_interpreter = python_tool is not None
             self.python_call_ids: list[str] = []
+            self.active_function_call: Optional[FunctionCallItem] = None
+            self.active_function_call_output_index: Optional[int] = None
+            self.active_function_call_arguments: str = ""
+            self.active_function_call_added: bool = False
 
         def _send_event(self, event: ResponseEvent):
             event.sequence_number = self.sequence_number
@@ -691,20 +696,58 @@ def create_api_server(
                                 ):
                                     arguments = previous_item.content[0].text
 
-                                fc_id = f"fc_{uuid.uuid4().hex}"
-                                call_id = f"call_{uuid.uuid4().hex}"
-                                function_call_item = FunctionCallItem(
-                                    type="function_call",
-                                    name=(
-                                        recipient[len("functions.") :]
-                                        if recipient.startswith("functions.")
-                                        else recipient
-                                    ),
-                                    arguments=arguments,
-                                    id=fc_id,
-                                    call_id=call_id,
+                                function_name = (
+                                    recipient[len("functions.") :]
+                                    if recipient.startswith("functions.")
+                                    else recipient
                                 )
-                                self.function_call_ids.append((fc_id, call_id))
+
+                                final_arguments = (
+                                    self.active_function_call_arguments or arguments
+                                )
+
+                                if (
+                                    self.active_function_call is not None
+                                    and self.active_function_call_output_index
+                                    == current_output_index
+                                ):
+                                    function_call_item = self.active_function_call
+                                else:
+                                    fc_id = f"fc_{uuid.uuid4().hex}"
+                                    call_id = f"call_{uuid.uuid4().hex}"
+                                    function_call_item = FunctionCallItem(
+                                        type="function_call",
+                                        name=function_name,
+                                        arguments=final_arguments,
+                                        id=fc_id,
+                                        call_id=call_id,
+                                    )
+                                    self.function_call_ids.append((fc_id, call_id))
+                                    self.active_function_call = function_call_item
+                                    self.active_function_call_output_index = (
+                                        current_output_index
+                                    )
+                                    self.active_function_call_arguments = final_arguments
+                                    self.active_function_call_added = False
+
+                                if not self.active_function_call_added:
+                                    added_item = function_call_item.model_copy()
+                                    added_item.status = "in_progress"
+                                    added_item.arguments = (
+                                        self.active_function_call_arguments or ""
+                                    )
+                                    yield self._send_event(
+                                        ResponseOutputItemAdded(
+                                            type="response.output_item.added",
+                                            output_index=current_output_index,
+                                            item=added_item,
+                                        )
+                                    )
+                                    sent_output_item_added = True
+                                    self.active_function_call_added = True
+
+                                function_call_item.arguments = final_arguments
+                                function_call_item.status = "completed"
                                 yield self._send_event(
                                     ResponseOutputItemDone(
                                         type="response.output_item.done",
@@ -713,6 +756,10 @@ def create_api_server(
                                     )
                                 )
                                 stop_for_function_call = True
+                                self.active_function_call = None
+                                self.active_function_call_output_index = None
+                                self.active_function_call_arguments = ""
+                                self.active_function_call_added = False
 
                         if not stop_for_function_call:
                             if previous_item.channel == "analysis":
@@ -804,6 +851,71 @@ def create_api_server(
                 if stop_for_function_call:
                     self.output_tokens.append(next_tok)
                     break
+
+                if (
+                    self.parser.last_content_delta
+                    and self.parser.current_recipient is not None
+                    and is_not_builtin_tool(self.parser.current_recipient)
+                ):
+                    recipient = self.parser.current_recipient
+                    if (
+                        self.active_function_call is None
+                        or self.active_function_call_output_index
+                        != current_output_index
+                    ):
+                        fc_id = f"fc_{uuid.uuid4().hex}"
+                        call_id = f"call_{uuid.uuid4().hex}"
+                        function_name = (
+                            recipient[len("functions.") :]
+                            if recipient.startswith("functions.")
+                            else recipient
+                        )
+                        self.active_function_call = FunctionCallItem(
+                            type="function_call",
+                            name=function_name,
+                            arguments="",
+                            status="in_progress",
+                            id=fc_id,
+                            call_id=call_id,
+                        )
+                        self.active_function_call_output_index = (
+                            current_output_index
+                        )
+                        self.active_function_call_arguments = ""
+                        self.active_function_call_added = False
+                        self.function_call_ids.append((fc_id, call_id))
+
+                    if not self.active_function_call_added:
+                        added_item = self.active_function_call.model_copy()
+                        added_item.status = "in_progress"
+                        added_item.arguments = (
+                            self.active_function_call_arguments or ""
+                        )
+                        yield self._send_event(
+                            ResponseOutputItemAdded(
+                                type="response.output_item.added",
+                                output_index=current_output_index,
+                                item=added_item,
+                            )
+                        )
+                        sent_output_item_added = True
+                        self.active_function_call_added = True
+
+                    delta_text = self.parser.last_content_delta
+                    if delta_text:
+                        self.active_function_call_arguments += delta_text
+                        self.active_function_call.arguments = (
+                            self.active_function_call_arguments
+                        )
+                        yield self._send_event(
+                            ResponseFunctionCallArgumentsDelta(
+                                type="response.function_call_arguments.delta",
+                                output_index=current_output_index,
+                                item_id=self.active_function_call.id,
+                                delta=delta_text,
+                            )
+                        )
+                    continue
 
                 if (
                     self.parser.last_content_delta

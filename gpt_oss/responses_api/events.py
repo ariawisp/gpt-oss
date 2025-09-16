@@ -77,6 +77,15 @@ class ResponseOutputItemAdded(ResponseEvent):
     ]
 
 
+class ResponseFunctionCallArgumentsDelta(ResponseEvent):
+    type: Literal[
+        "response.function_call_arguments.delta"
+    ] = "response.function_call_arguments.delta"
+    output_index: int = 0
+    item_id: str = "item_1234"
+    delta: str = ""
+
+
 class ResponseOutputItemDone(ResponseEvent):
     type: Literal["response.output_item.done"] = "response.output_item.done"
     output_index: int = 0
