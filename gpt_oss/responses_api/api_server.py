@@ -658,127 +658,152 @@ def create_api_server(
                 except Exception:
                     pass
 
+                stop_for_function_call = False
+
                 if self.parser.state == StreamState.EXPECT_START:
                     current_output_index += 1
                     sent_output_item_added = False
 
                     if len(self.parser.messages) > 0:
                         previous_item = self.parser.messages[-1]
-                        if previous_item.recipient is not None:
-                            recipient = previous_item.recipient
-                            if (
-                                not recipient.startswith("browser.")
-                                and not recipient == "python"
-                            ):
+                        try:
+                            parsed_entries = encoding.parse_messages_from_completion_tokens(
+                                self.output_tokens + [next_tok], Role.ASSISTANT
+                            )
+                        except Exception:
+                            parsed_entries = []
+
+                        function_call_item = None
+                        if parsed_entries:
+                            entry_dict = parsed_entries[-1].to_dict()
+                            recipient = entry_dict.get("recipient")
+                            if recipient and is_not_builtin_tool(recipient):
+                                content_items = entry_dict.get("content") or []
+                                arguments = ""
+                                if content_items:
+                                    first_item = content_items[0]
+                                    if isinstance(first_item, dict):
+                                        arguments = first_item.get("text", "")
+                                if (
+                                    not arguments
+                                    and getattr(previous_item, "content", None)
+                                    and previous_item.content
+                                ):
+                                    arguments = previous_item.content[0].text
+
                                 fc_id = f"fc_{uuid.uuid4().hex}"
                                 call_id = f"call_{uuid.uuid4().hex}"
+                                function_call_item = FunctionCallItem(
+                                    type="function_call",
+                                    name=(
+                                        recipient[len("functions.") :]
+                                        if recipient.startswith("functions.")
+                                        else recipient
+                                    ),
+                                    arguments=arguments,
+                                    id=fc_id,
+                                    call_id=call_id,
+                                )
                                 self.function_call_ids.append((fc_id, call_id))
                                 yield self._send_event(
                                     ResponseOutputItemDone(
                                         type="response.output_item.done",
                                         output_index=current_output_index,
-                                        item=FunctionCallItem(
-                                            type="function_call",
-                                            name=(
-                                                previous_item.recipient[
-                                                    len("functions.") :
-                                                ]
-                                                if previous_item.recipient.startswith(
-                                                    "functions."
-                                                )
-                                                else previous_item.recipient
-                                            ),
-                                            arguments=previous_item.content[0].text,
-                                            id=fc_id,
-                                            call_id=call_id,
+                                        item=function_call_item,
+                                    )
+                                )
+                                stop_for_function_call = True
+
+                        if not stop_for_function_call:
+                            if previous_item.channel == "analysis":
+                                yield self._send_event(
+                                    ResponseReasoningTextDone(
+                                        type="response.reasoning_text.done",
+                                        output_index=current_output_index,
+                                        content_index=current_content_index,
+                                        text=previous_item.content[0].text,
+                                    )
+                                )
+                                yield self._send_event(
+                                    ResponseContentPartDone(
+                                        type="response.content_part.done",
+                                        output_index=current_output_index,
+                                        content_index=current_content_index,
+                                        part=ReasoningTextContentItem(
+                                            type="reasoning_text",
+                                            text=previous_item.content[0].text,
                                         ),
                                     )
                                 )
-                        if previous_item.channel == "analysis":
-                            yield self._send_event(
-                                ResponseReasoningTextDone(
-                                    type="response.reasoning_text.done",
-                                    output_index=current_output_index,
-                                    content_index=current_content_index,
-                                    text=previous_item.content[0].text,
+                                yield self._send_event(
+                                    ResponseOutputItemDone(
+                                        type="response.output_item.done",
+                                        output_index=current_output_index,
+                                        item=ReasoningItem(
+                                            type="reasoning",
+                                            summary=[],
+                                            content=[
+                                                ReasoningTextContentItem(
+                                                    type="reasoning_text",
+                                                    text=previous_item.content[0].text,
+                                                )
+                                            ],
+                                        ),
+                                    )
                                 )
-                            )
-                            yield self._send_event(
-                                ResponseContentPartDone(
-                                    type="response.content_part.done",
-                                    output_index=current_output_index,
-                                    content_index=current_content_index,
-                                    part=ReasoningTextContentItem(
-                                        type="reasoning_text",
-                                        text=previous_item.content[0].text,
-                                    ),
-                                )
-                            )
-                            yield self._send_event(
-                                ResponseOutputItemDone(
-                                    type="response.output_item.done",
-                                    output_index=current_output_index,
-                                    item=ReasoningItem(
-                                        type="reasoning",
-                                        summary=[],
-                                        content=[
-                                            ReasoningTextContentItem(
-                                                type="reasoning_text",
-                                                text=previous_item.content[0].text,
-                                            )
-                                        ],
-                                    ),
-                                )
-                            )
-                        if previous_item.channel == "final":
-                            annotations = [
-                                UrlCitation(**a) for a in current_annotations
-                            ]
-                            if browser_tool:
-                                (
-                                    normalized_text,
-                                    _annotations,
-                                    _has_partial_citations,
-                                ) = browser_tool.normalize_citations(
-                                    previous_item.content[0].text
-                                )
-                            else:
-                                normalized_text = previous_item.content[0].text
-                                annotations = []
-                            text_content = TextContentItem(
-                                type="output_text",
-                                text=normalized_text,
-                                annotations=annotations,
-                            )
-                            yield self._send_event(
-                                ResponseOutputTextDone(
-                                    type="response.output_text.done",
-                                    output_index=current_output_index,
-                                    content_index=current_content_index,
+                            if previous_item.channel == "final":
+                                annotations = [
+                                    UrlCitation(**a) for a in current_annotations
+                                ]
+                                if browser_tool:
+                                    (
+                                        normalized_text,
+                                        _annotations,
+                                        _has_partial_citations,
+                                    ) = browser_tool.normalize_citations(
+                                        previous_item.content[0].text
+                                    )
+                                else:
+                                    normalized_text = previous_item.content[0].text
+                                    annotations = []
+                                text_content = TextContentItem(
+                                    type="output_text",
                                     text=normalized_text,
+                                    annotations=annotations,
                                 )
-                            )
-                            yield self._send_event(
-                                ResponseContentPartDone(
-                                    type="response.content_part.done",
-                                    output_index=current_output_index,
-                                    content_index=current_content_index,
-                                    part=text_content,
+                                yield self._send_event(
+                                    ResponseOutputTextDone(
+                                        type="response.output_text.done",
+                                        output_index=current_output_index,
+                                        content_index=current_content_index,
+                                        text=normalized_text,
+                                    )
                                 )
-                            )
-                            yield self._send_event(
-                                ResponseOutputItemDone(
-                                    type="response.output_item.done",
-                                    output_index=current_output_index,
-                                    item=Item(
-                                        type="message",
-                                        role="assistant",
-                                        content=[text_content],
-                                    ),
+                                yield self._send_event(
+                                    ResponseContentPartDone(
+                                        type="response.content_part.done",
+                                        output_index=current_output_index,
+                                        content_index=current_content_index,
+                                        part=text_content,
+                                    )
                                 )
-                            )
-                            current_annotations = []
-                            current_output_text_content = ""
+                                yield self._send_event(
+                                    ResponseOutputItemDone(
+                                        type="response.output_item.done",
+                                        output_index=current_output_index,
+                                        item=Item(
+                                            type="message",
+                                            role="assistant",
+                                            content=[text_content],
+                                        ),
+                                    )
+                                )
+                                current_annotations = []
+                                current_output_text_content = ""
+
+                if stop_for_function_call:
+                    self.output_tokens.append(next_tok)
+                    break
 
                 if (
                     self.parser.last_content_delta
