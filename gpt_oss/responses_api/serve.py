@@ -35,6 +35,13 @@ if __name__ == "__main__":
         # default to metal on macOS, triton on other platforms
         default="metal" if __import__("platform").system() == "Darwin" else "triton",
     )
+    parser.add_argument(
+        "--model-id",
+        metavar="MODEL",
+        type=str,
+        default=None,
+        help="Model identifier to report via the API",
+    )
     args = parser.parse_args()
 
     if args.inference_backend == "triton":
@@ -55,4 +62,7 @@ if __name__ == "__main__":
     encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
     infer_next_token = setup_model(args.checkpoint)
-    uvicorn.run(create_api_server(infer_next_token, encoding), port=args.port)
+    uvicorn.run(
+        create_api_server(infer_next_token, encoding, model_id=args.model_id),
+        port=args.port,
+    )
