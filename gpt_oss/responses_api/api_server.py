@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 import uuid
-from typing import Any, AsyncGenerator, Callable, Literal, Optional
+from typing import Any, AsyncGenerator, Callable, Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -71,13 +71,19 @@ from .types import (
 DEFAULT_TEMPERATURE = 0.0
 
 
-def get_reasoning_effort(effort: Literal["low", "medium", "high"]) -> ReasoningEffort:
-    if effort == "low":
-        return ReasoningEffort.LOW
-    if effort == "medium":
-        return ReasoningEffort.MEDIUM
-    if effort == "high":
-        return ReasoningEffort.HIGH
+def get_reasoning_effort(
+    effort: Union[Literal["low", "medium", "high"], ReasoningEffort]
+) -> ReasoningEffort:
+    if isinstance(effort, ReasoningEffort):
+        return effort
+    if isinstance(effort, str):
+        normalized = effort.lower()
+        if normalized == "low":
+            return ReasoningEffort.LOW
+        if normalized == "medium":
+            return ReasoningEffort.MEDIUM
+        if normalized == "high":
+            return ReasoningEffort.HIGH
     raise ValueError(f"Invalid reasoning effort: {effort}")
 
 

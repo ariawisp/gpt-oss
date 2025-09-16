@@ -1,11 +1,12 @@
 from typing import Any, Dict, Literal, Optional, Union
 
-from openai_harmony import ReasoningEffort
 from pydantic import BaseModel
 
 MODEL_IDENTIFIER = "gpt-oss-120b"
 DEFAULT_TEMPERATURE = 0.0
-REASONING_EFFORT = ReasoningEffort.LOW
+# Reasoning effort defaults to the string value that OpenAI's API expects.
+# (The Harmony conversion layer will map this to ``ReasoningEffort.LOW``.)
+REASONING_EFFORT = "low"
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
 
 
