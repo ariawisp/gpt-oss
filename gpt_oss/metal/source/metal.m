@@ -113,12 +113,51 @@ enum gptoss_status gptoss_metal_library_create_default(
             goto cleanup;
         }
     } else {
-        // Fall-back to loading from the bundle
-        library_obj = [device_obj newDefaultLibrary];
+        // Fallbacks: explicit path via env, GPTOSS_LIB_DIR/default.metallib,
+        // executable-relative default.metallib, then bundle default
+        NSError* error_obj = nil;
+        const char* env_path = getenv("GPTOSS_METALLIB_PATH");
+        if (env_path != NULL && env_path[0] != '\0') {
+            NSString* path = [NSString stringWithUTF8String:env_path];
+            library_obj = [device_obj newLibraryWithFile:path error:&error_obj];
+            if (library_obj == nil) {
+                GPTOSS_LOG_ERROR("failed to create Metal library from GPTOSS_METALLIB_PATH (%s): %s", env_path, [[error_obj localizedDescription] UTF8String]);
+            }
+        }
         if (library_obj == nil) {
-            GPTOSS_LOG_ERROR("failed to create Metal default library");
-            status = gptoss_status_unsupported_system;
-            goto cleanup;
+            const char* libdir = getenv("GPTOSS_LIB_DIR");
+            if (libdir != NULL && libdir[0] != '\0') {
+                NSString* path = [NSString stringWithFormat:@"%s/%@", libdir, @"default.metallib"];
+                library_obj = [device_obj newLibraryWithFile:path error:&error_obj];
+                if (library_obj == nil) {
+                    GPTOSS_LOG_ERROR("failed to create Metal library from GPTOSS_LIB_DIR (%s/default.metallib): %s", libdir, [[error_obj localizedDescription] UTF8String]);
+                }
+            }
+        }
+        if (library_obj == nil) {
+            // Try @executable_path/../share/codexpc/default.metallib
+            char exePath[PATH_MAX];
+            uint32_t size = (uint32_t)sizeof(exePath);
+            if (_NSGetExecutablePath(exePath, &size) == 0) {
+                char resolved[PATH_MAX];
+                if (realpath(exePath, resolved) != NULL) {
+                    NSString* p = [NSString stringWithUTF8String:resolved];
+                    NSString* dir = [p stringByDeletingLastPathComponent]; // .../bin
+                    NSString* rel = [[dir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"share/codexpc/default.metallib"];
+                    library_obj = [device_obj newLibraryWithFile:rel error:&error_obj];
+                    if (library_obj == nil) {
+                        GPTOSS_LOG_ERROR("failed to create Metal library from executable-relative path (%s): %s", [rel UTF8String], [[error_obj localizedDescription] UTF8String]);
+                    }
+                }
+            }
+        }
+        if (library_obj == nil) {
+            library_obj = [device_obj newDefaultLibrary];
+            if (library_obj == nil) {
+                GPTOSS_LOG_ERROR("failed to create Metal default library");
+                status = gptoss_status_unsupported_system;
+                goto cleanup;
+            }
         }
     }
 
@@ -264,6 +303,23 @@ enum gptoss_status gptoss_metal_buffer_create(
     buffer_out->object = (void*) buffer_obj;
     buffer_out->size = size;
     buffer_out->ptr = [buffer_obj contents];
+    return gptoss_status_success;
+}
+
+enum gptoss_status gptoss_metal_buffer_create_private(
+    const struct gptoss_metal_device* device,
+    size_t size,
+    struct gptoss_metal_buffer* buffer_out)
+{
+    id<MTLDevice> device_obj = (id<MTLDevice>) device->object;
+    id<MTLBuffer> buffer_obj = [device_obj newBufferWithLength:size options:MTLResourceStorageModePrivate];
+    if (buffer_obj == nil) {
+        GPTOSS_LOG_ERROR("failed to create Private Metal buffer of size %zu", size);
+        return gptoss_status_unsupported_system;
+    }
+    buffer_out->object = (void*) buffer_obj;
+    buffer_out->size = size;
+    buffer_out->ptr = NULL; // Private storage not CPU-mapped
     return gptoss_status_success;
 }
 

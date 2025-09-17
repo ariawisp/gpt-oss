@@ -64,6 +64,12 @@ enum gptoss_status gptoss_metal_buffer_create(
     const void* data,
     struct gptoss_metal_buffer* buffer_out);
 
+// Creates a Metal buffer in Private storage (no CPU mapping). Data must be uploaded via blit.
+enum gptoss_status gptoss_metal_buffer_create_private(
+    const struct gptoss_metal_device* device,
+    size_t size,
+    struct gptoss_metal_buffer* buffer_out);
+
 enum gptoss_status gptoss_metal_buffer_wrap(
     const struct gptoss_metal_device* device,
     size_t size,

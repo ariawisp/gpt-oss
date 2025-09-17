@@ -124,6 +124,7 @@ struct gptoss_model {
 
     // Buffer with non-MoE weights. Includes MoE gates, embeddings/unembeddings.
     struct gptoss_metal_buffer shared_weight_buffer;
+    size_t shared_weight_base_offset; // page alignment adjustment for shared_weight_buffer
     // num_blocks per-block buffers with MoE weights to follow.
     struct gptoss_metal_buffer block_weight_buffers[];
 };

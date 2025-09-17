@@ -291,10 +291,13 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
 
     prefetch_fd(fd, model_mapping_start, model_mapping_size, path);
 
-    if (mlock(model_mapping_ptr, model_mapping_size) != 0) {
-        GPTOSS_LOG_WARNING("mlock(%s, size=%zu) failed with error %d", path, model_mapping_size, errno);
-    } else {
-        model->lock_memory = true;
+    const char* disable_mlock = getenv("GPTOSS_DISABLE_MLOCK");
+    if (!(disable_mlock && disable_mlock[0] == '1')) {
+        if (mlock(model_mapping_ptr, model_mapping_size) != 0) {
+            GPTOSS_LOG_WARNING("mlock(%s, size=%zu) failed with error %d", path, model_mapping_size, errno);
+        } else {
+            model->lock_memory = true;
+        }
     }
 
     // Initialize Metal
@@ -425,10 +428,54 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
     const size_t shared_weights_size =
         round_up_to_page_size(embedding_weight_size + rmsnorm_weight_size + unembedding_weight_size + model->num_blocks * per_block_shared_weights_size);
 
-    status = gptoss_metal_buffer_wrap(&model->device, shared_weights_size, current_ptr, &model->shared_weight_buffer);
-    if (status != gptoss_status_success) {
-        GPTOSS_LOG_ERROR("failed to map expert-shared weight of size %zu onto a Metal buffer", shared_weights_size);
-        goto cleanup;
+    const char* use_private = getenv("GPTOSS_WEIGHTS_PRIVATE");
+    if (use_private && use_private[0] == '1') {
+        GPTOSS_LOG_WARNING("using Private storage upload for shared weights (%zu bytes)", shared_weights_size);
+        status = gptoss_metal_buffer_create_private(&model->device, shared_weights_size, &model->shared_weight_buffer);
+        if (status != gptoss_status_success) { goto cleanup; }
+        model->shared_weight_base_offset = 0;
+        // Upload via staging in 64 MiB chunks
+        const size_t chunk = (size_t)64 * 1024 * 1024;
+        size_t uploaded = 0;
+        while (uploaded < shared_weights_size) {
+            const size_t part = math_min(chunk, shared_weights_size - uploaded);
+            struct gptoss_metal_buffer staging = {0};
+            status = gptoss_metal_buffer_create(&model->device, part, (const uint8_t*)current_ptr + uploaded, &staging);
+            if (status != gptoss_status_success) { goto cleanup; }
+            struct gptoss_metal_command_buffer cb = {0};
+            status = gptoss_metal_command_buffer_create(&model->command_queue, &cb);
+            if (status != gptoss_status_success) { gptoss_metal_buffer_release(&staging); goto cleanup; }
+            status = gptoss_metal_command_buffer_encode_copy_buffer(&cb, &staging, 0, &model->shared_weight_buffer, uploaded, part);
+            if (status == gptoss_status_success) status = gptoss_metal_command_buffer_commit(&cb);
+            if (status == gptoss_status_success) status = gptoss_metal_command_buffer_wait_completion(&cb, NULL);
+            gptoss_metal_command_buffer_release(&cb);
+            gptoss_metal_buffer_release(&staging);
+            if (status != gptoss_status_success) { goto cleanup; }
+            uploaded += part;
+        }
+    } else {
+        // Ensure page alignment for bytesNoCopy buffers: wrap from a page-aligned start and carry an offset
+        uintptr_t curr_addr = (uintptr_t) current_ptr;
+        uintptr_t shared_base_addr = curr_addr & ~((uintptr_t)vm_page_size - 1);
+        size_t base_adjust = (size_t)(curr_addr - shared_base_addr);
+        size_t wrapped_size = round_up_to_page_size(shared_weights_size + base_adjust);
+        void* shared_base_ptr = (void*) shared_base_addr;
+        model->shared_weight_base_offset = base_adjust;
+
+        const char* force_copy = getenv("GPTOSS_FORCE_COPY_BUFFERS");
+        if (force_copy && force_copy[0] == '1') {
+            status = gptoss_metal_buffer_create(&model->device, wrapped_size, shared_base_ptr, &model->shared_weight_buffer);
+        } else {
+            status = gptoss_metal_buffer_wrap(&model->device, wrapped_size, shared_base_ptr, &model->shared_weight_buffer);
+        }
+        if (status != gptoss_status_success) {
+            // Fallback: attempt to create a Metal buffer by copying if wrap fails (some systems reject very large no-copy buffers)
+            status = gptoss_metal_buffer_create(&model->device, wrapped_size, shared_base_ptr, &model->shared_weight_buffer);
+            if (status != gptoss_status_success) {
+                GPTOSS_LOG_ERROR("failed to map expert-shared weight of size %zu onto a Metal buffer", shared_weights_size);
+                goto cleanup;
+            }
+        }
     }
     current_ptr += shared_weights_size;
     model->weights_size += shared_weights_size;
@@ -448,11 +495,41 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
         mlp_swiglu_weight_block_size + mlp_swiglu_weight_scale_size + mlp_swiglu_bias_size + mlp_out_weight_block_size + mlp_out_weight_scale_size + mlp_out_bias_size;
     const size_t moe_block_weight_size = round_up_to_page_size(model->num_experts * model->per_expert_block_weight_size);
     for (uint32_t n = 0; n < model->num_blocks; n++) {
-        status = gptoss_metal_buffer_wrap(&model->device, moe_block_weight_size, current_ptr, &model->block_weight_buffers[n]);
+        if (use_private && use_private[0] == '1') {
+            GPTOSS_LOG_WARNING("using Private storage upload for MoE block #%u (%zu bytes)", n, moe_block_weight_size);
+            status = gptoss_metal_buffer_create_private(&model->device, moe_block_weight_size, &model->block_weight_buffers[n]);
+            if (status != gptoss_status_success) { goto cleanup; }
+            const size_t chunk = (size_t)64 * 1024 * 1024;
+            size_t uploaded = 0;
+            while (uploaded < moe_block_weight_size) {
+                const size_t part = math_min(chunk, moe_block_weight_size - uploaded);
+                struct gptoss_metal_buffer staging = {0};
+                status = gptoss_metal_buffer_create(&model->device, part, (const uint8_t*)current_ptr + uploaded, &staging);
+                if (status != gptoss_status_success) { goto cleanup; }
+                struct gptoss_metal_command_buffer cb = {0};
+                status = gptoss_metal_command_buffer_create(&model->command_queue, &cb);
+                if (status != gptoss_status_success) { gptoss_metal_buffer_release(&staging); goto cleanup; }
+                status = gptoss_metal_command_buffer_encode_copy_buffer(&cb, &staging, 0, &model->block_weight_buffers[n], uploaded, part);
+                if (status == gptoss_status_success) status = gptoss_metal_command_buffer_commit(&cb);
+                if (status == gptoss_status_success) status = gptoss_metal_command_buffer_wait_completion(&cb, NULL);
+                gptoss_metal_command_buffer_release(&cb);
+                gptoss_metal_buffer_release(&staging);
+                if (status != gptoss_status_success) { goto cleanup; }
+                uploaded += part;
+            }
+        } else if ((getenv("GPTOSS_FORCE_COPY_BUFFERS") != NULL) && getenv("GPTOSS_FORCE_COPY_BUFFERS")[0] == '1') {
+            status = gptoss_metal_buffer_create(&model->device, moe_block_weight_size, current_ptr, &model->block_weight_buffers[n]);
+        } else {
+            status = gptoss_metal_buffer_wrap(&model->device, moe_block_weight_size, current_ptr, &model->block_weight_buffers[n]);
+        }
         if (status != gptoss_status_success) {
-            GPTOSS_LOG_ERROR("failed to map block #%" PRIu32 " MoE weight of size %zu onto a Metal buffer",
-                n, moe_block_weight_size);
-            goto cleanup;
+            // Fallback: create-and-copy buffer for this block if wrap fails
+            status = gptoss_metal_buffer_create(&model->device, moe_block_weight_size, current_ptr, &model->block_weight_buffers[n]);
+            if (status != gptoss_status_success) {
+                GPTOSS_LOG_ERROR("failed to map block #%" PRIu32 " MoE weight of size %zu onto a Metal buffer",
+                    n, moe_block_weight_size);
+                goto cleanup;
+            }
         }
         current_ptr += moe_block_weight_size;
         model->weights_size += moe_block_weight_size;
